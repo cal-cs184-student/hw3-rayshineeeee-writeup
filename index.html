@@ -1,106 +1,235 @@
-<html>
-	<head>
-		<script src='https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.4/MathJax.js?config=default'></script>
-		<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
-		<style>
-			h1 {
-				text-align: center;
-			}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Path tracer · Ray Sun · CS 184</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+  <nav aria-label="Contents">
+    <a class="home" href="#overview">CS 184 · Homework 3</a>
+    <a href="#rays">1 · Ray and scene intersection</a>
+    <a href="#bvh">2 · BVH</a>
+    <a href="#direct">3 · Direct illumination</a>
+    <a href="#global">4 · Global illumination</a>
+    <a href="#adaptive">5 · Adaptive sampling</a>
+    <a href="#extra-credit">6 · Extra credit</a>
+  </nav>
+  <main>
+    <header id="overview">
+      <p class="eyebrow">CS 184 · Fall 2026 · Ray Sun</p>
+      <h1>Path tracer</h1>
+      <p class="meta"><a href="https://cal-cs184-student.github.io/hw3-rayshineeeee-writeup/">cal-cs184-student.github.io/hw3-rayshineeeee-writeup/</a></p>
+      <h2>Overview</h2>
+      <p>I traced rays from the camera to find the visible surfaces, then used a BVH to speed up those intersection tests. From there, I added direct lighting, indirect bounces, and adaptive sampling.</p>
+      <p>The ceiling in the bunny scene made the biggest difference for me. It stays dark with direct light alone, then lights up once the floor and walls can reflect light onto it.</p>
+    </header>
 
-			.container {
-				margin: 0 auto;
-				padding: 60px 20%;
-			}
+    <section id="rays">
+      <h2>Part 1 · Ray generation and scene intersection</h2>
+      <p>I pick a random point inside each pixel and map it onto the camera’s image plane at <i>z</i> = −1. The field of view sets the size of that plane. I rotate the direction into world space, normalize it, and set the ray’s near and far limits.</p>
+      <p>For triangles, I used Möller–Trumbore. It finds the ray distance <i>t</i> and two barycentric weights <i>u</i> and <i>v</i>. A zero determinant means the test has no unique hit. I accept the hit when <i>t</i> is in range and <i>u</i>, <i>v</i>, and 1 − <i>u</i> − <i>v</i> are all nonnegative. Those three weights also let me blend the vertex normals.</p>
+      <p>For spheres, I solve a quadratic and choose the closest root inside the ray’s limits. The normal points from the center to the hit. For both shapes, finding a hit shortens the ray so a farther surface can’t replace it.</p>
+      <div class="figures ">
+<figure><img src="assets/normal-cube.png" width="480" height="360" alt="Cube with color mapped from interpolated normals"><figcaption><code>cube.dae</code></figcaption></figure>
+<figure><img src="assets/normal-plane.png" width="480" height="360" alt="A constant pale blue plane against a black background"><figcaption><code>plane.dae</code></figcaption></figure>
+<figure><img src="assets/normal-spheres.png" width="480" height="360" alt="Two spheres with smooth gradients inside a normal-shaded Cornell box"><figcaption><code>CBspheres_lambertian.dae</code></figcaption></figure>
+</div>
+      <p class="meta">Normal shading · 16 samples per pixel.</p>
+    </section>
 
-			figure {
-				text-align: center;
-			}
+    <section id="bvh" class="sheet">
+      <h2>Part 2 · Bounding volume hierarchy</h2>
+      <p>I enclose the scene geometry in a box and split it into smaller groups. For the median BVH, I find the axis where the centers of the primitive bounds spread out the most and split at the median. I stop when a leaf has four primitives or fewer.</p>
+      <p>I intersect the ray’s range with the box along each axis. If those intervals have no overlap, I skip the whole node. I check the nearer child first for a closest hit. If that hit is closer than the other child’s box, I can skip the other child too.</p>
+      <div class="figures pair">
+<figure><img src="assets/normal-dragon.png" width="480" height="360" alt="Mesh dragon on a round stand with normals as color"><figcaption><code>dragon.dae</code> · 105,120 primitives</figcaption></figure>
+<figure><img src="assets/normal-lucy.png" width="480" height="360" alt="Lucy within a Cornell box with normals as color"><figcaption><code>CBlucy.dae</code> · 133,796 primitives</figcaption></figure>
+</div>
+      <div class="table-viewport">
+        <table>
+          <caption>Median render times from five single-threaded runs on an M5 Pro. 240 × 180, one sample per pixel.</caption>
+          <thead><tr><th scope="col">Scene</th><th scope="col">Primitives</th><th scope="col">Linear (ms)</th><th scope="col">Median BVH (ms)</th><th scope="col">Speedup</th><th scope="col">BVH tests/ray</th></tr></thead>
+          <tbody><tr><th scope="row">Teapot</th><td>2,464</td><td>280.6</td><td>7.9</td><td>35.5×</td><td>5.78</td></tr><tr><th scope="row">Cow</th><td>5,856</td><td>638.6</td><td>8.7</td><td>73.4×</td><td>5.79</td></tr><tr><th scope="row">Cornell bunny</th><td>28,588</td><td>2,922.1</td><td>11.5</td><td>254.1×</td><td>8.24</td></tr></tbody>
+        </table>
+      </div>
+      <p>The bunny benefited the most. Without the BVH, each camera ray checks all 28,588 primitives. With the median split, it checks about eight on average. That brought the render down from about 2.9 seconds to 11.5 ms.</p>
+    </section>
 
-			img {
-				display: inline-block;
-			}
+    <section id="direct" class="sheet">
+      <h2>Part 3 · Direct illumination</h2>
+      <p>I count the light source’s own emission as zero-bounce light. For diffuse surfaces, I use the surface color divided by π as the BRDF.</p>
+      <p>For hemisphere sampling, I pick uniform directions above the surface and trace a ray in each one. A sample contributes light when its first hit is an emitter.</p>
+      <p>For importance sampling, I pick a point or direction from each light and check whether a shadow ray can reach it. I sample delta lights once and area lights multiple times. In both methods, I weight the incoming light by the BRDF and the cosine of the angle to the normal, divide by the sampling PDF, and average the samples.</p>
+      <h3>Same light budget, two estimators</h3>
+      <p class="meta">16 samples per pixel · 16 samples per light · depth 1.</p>
+      <div class="figures four">
+<figure><img src="assets/direct-bunny-hemisphere.png" width="480" height="360" alt="Bunny rendered with uniform hemisphere sampling for direct light"><figcaption>Bunny · Uniform hemisphere</figcaption></figure>
+<figure><img src="assets/direct-bunny-importance.png" width="480" height="360" alt="Bunny rendered with light importance sampling for direct light"><figcaption>Bunny · Light importance</figcaption></figure>
+<figure><img src="assets/direct-spheres-hemisphere.png" width="480" height="360" alt="Spheres rendered with uniform hemisphere sampling for direct light"><figcaption>Spheres · Uniform hemisphere</figcaption></figure>
+<figure><img src="assets/direct-spheres-importance.png" width="480" height="360" alt="Spheres rendered with light importance sampling for direct light"><figcaption>Spheres · Light importance</figcaption></figure>
+</div>
+      <p>The hemisphere renders are much grainier. Most of those rays hit a wall or another surface that gives off no light. Sampling the light directly gives more rays a chance to contribute, so the walls and floor look smoother at the same sample count.</p>
+      <h3>Soft shadows with one camera sample per pixel</h3>
+      <div class="figures four">
+<figure><img src="assets/shadow-l1.png" width="480" height="360" alt="Cornell bunny direct light with one camera ray and 1 light samples"><figcaption>1 light sample</figcaption></figure>
+<figure><img src="assets/shadow-l4.png" width="480" height="360" alt="Cornell bunny direct light with one camera ray and 4 light samples"><figcaption>4 light samples</figcaption></figure>
+<figure><img src="assets/shadow-l16.png" width="480" height="360" alt="Cornell bunny direct light with one camera ray and 16 light samples"><figcaption>16 light samples</figcaption></figure>
+<figure><img src="assets/shadow-l64.png" width="480" height="360" alt="Cornell bunny direct light with one camera ray and 64 light samples"><figcaption>64 light samples</figcaption></figure>
+</div>
+      <p>With one light sample, the shadow edge is speckled because each pixel gets a single blocked or clear ray. With 4, 16, and then 64 samples, the edge gets smoother as the estimate of how much light is visible improves.</p>
+    </section>
 
-			body {
-				font-family: 'Inter', sans-serif;
-			}
-		</style>
-	</head>
-	<body>
-		<div class="container">
-		<h1>CS184/284A Fall 2026 Homework 3 Write-Up</h1>
-		<div style="text-align: center;">Names: </div>
+    <section id="global" class="sheet">
+      <h2>Part 4 · Global illumination</h2>
+      <p>I start with direct lighting at the first hit. To get indirect light, I sample a direction from the diffuse BSDF, trace it to the next surface, and repeat with one fewer bounce left. On the way back, I weight the returned light by the BRDF times the cosine, divided by the direction’s PDF. I add the direct estimate at each bounce included in the render.</p>
+      <h3>Direct and indirect light</h3>
+      <p class="meta">Cornell bunny · 1,024 samples per pixel, one sample per light.</p>
+      <div class="figures ">
+<figure><img src="assets/isolated-1.png" width="480" height="360" alt="Bunny lit by the overhead light, with dark underside and ceiling"><figcaption>Direct only · 1 bounce</figcaption></figure>
+<figure><img src="assets/indirect-only.png" width="480" height="360" alt="Bunny and ceiling lit by bounced red, blue and neutral light"><figcaption>Indirect only · 2–5 bounces</figcaption></figure>
+<figure><img src="assets/accumulated-5.png" width="480" height="360" alt="Bunny with directly lit surfaces and indirect fill combined"><figcaption>Full result · emission and 1–5 bounces</figcaption></figure>
+</div>
+      <p>In the direct-only image, the bunny is lit from above and the underside is dark. Adding indirect light fills in that shadow and picks up color from the walls.</p>
+      <h3>Another scene under global illumination</h3>
+      <div class="figures single">
+<figure><img src="assets/spp-1024.png" width="480" height="360" alt="Cornell spheres with clean soft shadows, lit ceiling and red-blue color spill"><figcaption>Lambertian spheres · depth 5 · 1,024 samples per pixel · 4 light samples</figcaption></figure>
+</div>
+    </section>
 
-		<br>
+    <section class="sheet" aria-labelledby="depths">
+      <h2 id="depths">Part 4 · Bounce depth</h2>
+      <p>The isolated images show one bounce at a time. The accumulated images add each bounce up through the selected depth. Depth 0 gives the light source itself. Both sets use 1,024 samples per pixel and one sample per light, with roulette disabled.</p>
+      <h3>Isolated bounce <span aria-hidden="true">·</span> <code>-o 0</code></h3>
+      <div class="figures matrix">
+<figure><img src="assets/isolated-0.png" width="480" height="360" alt="Cornell box with bunny, isolated lighting, depth 0"><figcaption>m = 0 · Visible emitter only</figcaption></figure>
+<figure><img src="assets/isolated-1.png" width="480" height="360" alt="Cornell box with bunny, isolated lighting, depth 1"><figcaption>m = 1 · Direct light</figcaption></figure>
+<figure><img src="assets/isolated-2.png" width="480" height="360" alt="Cornell box with bunny, isolated lighting, depth 2"><figcaption>m = 2 · First indirect bounce</figcaption></figure>
+<figure><img src="assets/isolated-3.png" width="480" height="360" alt="Cornell box with bunny, isolated lighting, depth 3"><figcaption>m = 3 · Second indirect bounce</figcaption></figure>
+<figure><img src="assets/isolated-4.png" width="480" height="360" alt="Cornell box with bunny, isolated lighting, depth 4"><figcaption>m = 4 · Third indirect bounce</figcaption></figure>
+<figure><img src="assets/isolated-5.png" width="480" height="360" alt="Cornell box with bunny, isolated lighting, depth 5"><figcaption>m = 5 · Fourth indirect bounce</figcaption></figure>
+</div>
+      <h3>Accumulated through the selected depth <span aria-hidden="true">·</span> <code>-o 1</code></h3>
+      <div class="figures matrix">
+<figure><img src="assets/isolated-0.png" width="480" height="360" alt="Cornell box with bunny, accumulated lighting, depth 0"><figcaption>m = 0 · Visible emitter only</figcaption></figure>
+<figure><img src="assets/accumulated-1.png" width="480" height="360" alt="Cornell box with bunny, accumulated lighting, depth 1"><figcaption>m = 1 · Through direct light</figcaption></figure>
+<figure><img src="assets/accumulated-2.png" width="480" height="360" alt="Cornell box with bunny, accumulated lighting, depth 2"><figcaption>m = 2 · Through 2 bounces</figcaption></figure>
+<figure><img src="assets/accumulated-3.png" width="480" height="360" alt="Cornell box with bunny, accumulated lighting, depth 3"><figcaption>m = 3 · Through 3 bounces</figcaption></figure>
+<figure><img src="assets/accumulated-4.png" width="480" height="360" alt="Cornell box with bunny, accumulated lighting, depth 4"><figcaption>m = 4 · Through 4 bounces</figcaption></figure>
+<figure><img src="assets/accumulated-5.png" width="480" height="360" alt="Cornell box with bunny, accumulated lighting, depth 5"><figcaption>m = 5 · Through 5 bounces</figcaption></figure>
+</div>
+      <p>At bounce 2, light from the room reaches the ceiling and the underside of the bunny. Bounce 3 adds a weaker layer of red and blue from the walls. This is the kind of fill and color bleed that a direct-light rasterized render would miss.</p>
+    </section>
 
-		Link to webpage: (TODO) <a href="https://cs184.eecs.berkeley.edu/fa26">cs184.eecs.berkeley.edu/fa26</a>
-		Link to GitHub repository: (TODO) <a href="https://cs184.eecs.berkeley.edu/fa26">cs184.eecs.berkeley.edu/fa26</a>
-		
-		<figure>
-			<img src="assets/cornell.png" alt="Cornell Boxes with Bunnies" style="width:70%"/>
-			<figcaption>You can add images with captions!</figcaption>
-		</figure>
+    <section class="sheet" aria-labelledby="roulette">
+      <h2 id="roulette">Part 4 · Russian roulette</h2>
+      <p>I always try the first indirect bounce when the depth allows it. After that, each bounce has a 65% chance of continuing. I divide the contribution of a surviving path by 0.65 to make up for the paths that stopped.</p>
+      <p class="meta">Cornell bunny · 1,024 samples per pixel, one sample per light. Depths 0 and 1 reuse the earlier renders because neither reaches a roulette decision.</p>
+      <div class="figures ">
+<figure><img src="assets/isolated-0.png" width="480" height="360" alt="Cornell box with bunny, roulette lighting, depth 0"><figcaption>m = 0</figcaption></figure>
+<figure><img src="assets/accumulated-1.png" width="480" height="360" alt="Cornell box with bunny, roulette lighting, depth 1"><figcaption>m = 1</figcaption></figure>
+<figure><img src="assets/roulette-2.png" width="480" height="360" alt="Cornell box with bunny, roulette lighting, depth 2"><figcaption>m = 2</figcaption></figure>
+<figure><img src="assets/roulette-3.png" width="480" height="360" alt="Cornell box with bunny, roulette lighting, depth 3"><figcaption>m = 3</figcaption></figure>
+<figure><img src="assets/roulette-4.png" width="480" height="360" alt="Cornell box with bunny, roulette lighting, depth 4"><figcaption>m = 4</figcaption></figure>
+<figure><img src="assets/roulette-100.png" width="480" height="360" alt="Cornell box with bunny, roulette lighting, depth 100"><figcaption>m = 100</figcaption></figure>
+</div>
+      <p>The depth-100 render is a little brighter near the ceiling, where the later bounces add up.</p>
+    </section>
 
-		<!--
-		We've already added one heading per part, to make your write-up as navigable when grading. Please fit your write-up within these sections!
-		-->
+    <section class="sheet" aria-labelledby="samples">
+      <h2 id="samples">Part 4 · Camera samples per pixel</h2>
+      <p>I kept the light samples at four and the depth at five. At low sample counts, the ceiling and the darker sphere look grainy. By 1,024 samples, the shadows and silhouettes look much smoother.</p>
+      <div class="figures samples">
+<figure><img src="assets/spp-1.png" width="480" height="360" alt="Cornell spheres with four light samples and 1 pixel samples"><figcaption>1 sample per pixel</figcaption></figure>
+<figure><img src="assets/spp-2.png" width="480" height="360" alt="Cornell spheres with four light samples and 2 pixel samples"><figcaption>2 samples per pixel</figcaption></figure>
+<figure><img src="assets/spp-4.png" width="480" height="360" alt="Cornell spheres with four light samples and 4 pixel samples"><figcaption>4 samples per pixel</figcaption></figure>
+<figure><img src="assets/spp-8.png" width="480" height="360" alt="Cornell spheres with four light samples and 8 pixel samples"><figcaption>8 samples per pixel</figcaption></figure>
+<figure><img src="assets/spp-16.png" width="480" height="360" alt="Cornell spheres with four light samples and 16 pixel samples"><figcaption>16 samples per pixel</figcaption></figure>
+<figure><img src="assets/spp-64.png" width="480" height="360" alt="Cornell spheres with four light samples and 64 pixel samples"><figcaption>64 samples per pixel</figcaption></figure>
+<figure><img src="assets/spp-1024.png" width="480" height="360" alt="Cornell spheres with four light samples and 1024 pixel samples"><figcaption>1,024 samples per pixel</figcaption></figure>
+</div>
+    </section>
 
-		<h2>Overview</h2>
-		Give a high-level overview of what you implemented in this homework. Think about what you've built as a whole. Share your thoughts on what interesting things you've learned from completing the homework.
+    <section id="adaptive" class="sheet">
+      <h2>Part 5 · Adaptive sampling</h2>
+      <p>I track the mean and variance of the luminance for each pixel. Every 32 samples, I check whether the 95% confidence interval’s half-width is within 5% of the mean. Once it is, I stop and divide the RGB sum by the samples actually taken. Otherwise, I keep going up to 2,048.</p>
+      <p class="equation">1.96 × σ / √n ≤ 0.05 × mean luminance</p>
+      <p class="meta">Depth 5 · one sample per light · up to 2,048 samples per pixel. Blue means fewer samples, green is halfway, and red marks the cap.</p>
+      <div class="figures pair">
+<figure><img src="assets/adaptive-bunny.png" width="480" height="360" alt="Bunny lit by direct and indirect light"><figcaption>Bunny · adaptive render</figcaption></figure>
+<figure><img src="assets/adaptive-bunny_rate.png" width="480" height="360" alt="Bunny color map of the fraction of sample budget used"><figcaption>Bunny · sample rate</figcaption></figure>
+<figure><img src="assets/adaptive-spheres.png" width="480" height="360" alt="Spheres lit by direct and indirect light"><figcaption>Spheres · adaptive render</figcaption></figure>
+<figure><img src="assets/adaptive-spheres_rate.png" width="480" height="360" alt="Spheres color map of the fraction of sample budget used"><figcaption>Spheres · sample rate</figcaption></figure>
+</div>
+      <p>The light and flat walls settle quickly. The shadows, ceiling, and parts of the bunny and spheres stay noisy longer, so those areas use more samples.</p>
+    </section>
 
-		<h2>Part 1: Ray Generation and Scene Intersection</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+    <section id="extra-credit" class="sheet">
+      <h2>Part 6 · Extra credit</h2>
+      <h3>Surface area heuristic for BVH splits</h3>
+      <p>I started with the median split from Part 2. It balances the number of primitives in each child, but two equally sized groups can still have very different bounding boxes. For SAH, I put the primitive centers into 12 bins on each axis. Each bin stores a count and a bounding box. I sweep across the bins in both directions so I can get the left and right bounds at each split without scanning all the primitives again. <a href="https://pbr-book.org/4ed/Primitives_and_Intersection_Acceleration/Bounding_Volume_Hierarchies">Physically Based Rendering, §7.3.2</a></p>
+      <p>I score each split by multiplying each child’s surface area by its primitive count and adding the two products. A larger box is more likely to be hit, so that side matters more to the cost. I pick the lowest score and fall back to the median if the bins can’t split the group. I kept the traversal and the four-primitive leaf limit the same for both runs, so the main change was where the builder split each node.</p>
+      <div class="table-viewport">
+        <table>
+          <caption>Median split / SAH. Five single-threaded runs per method. Teapot, cow, and bunny at 240 × 180 with one sample per pixel. Dragon and Lucy at 480 × 360 with four.</caption>
+          <thead><tr><th scope="col">Scene</th><th scope="col">Build (ms)</th><th scope="col">Render (ms)</th><th scope="col">Tests per ray</th><th scope="col">Render speedup</th></tr></thead>
+          <tbody><tr><th scope="row">Teapot</th><td>0.6 / 0.8</td><td>7.9 / 7.1</td><td>5.78 / 4.59</td><td>1.11×</td></tr><tr><th scope="row">Cow</th><td>1.7 / 2.0</td><td>8.7 / 8.3</td><td>5.79 / 4.95</td><td>1.05×</td></tr><tr><th scope="row">Cornell bunny</th><td>10.2 / 13.0</td><td>11.5 / 8.9</td><td>8.24 / 7.77</td><td>1.29×</td></tr><tr><th scope="row">Dragon</th><td>41.1 / 55.9</td><td>126.0 / 89.8</td><td>4.36 / 2.73</td><td>1.40×</td></tr><tr><th scope="row">Cornell Lucy</th><td>44.6 / 63.0</td><td>159.3 / 88.3</td><td>6.59 / 5.23</td><td>1.80×</td></tr></tbody>
+        </table>
+      </div>
+      <p>SAH took longer to build but rendered faster in all five tests. The difference was small for the cow. Lucy got the biggest gain, from 159.3 ms to 88.3 ms. For the bunny, the build overhead used up the render savings on a single frame.</p>
+      <div class="figures pair">
+<figure><img src="assets/bench-dragon-median.png" width="480" height="360" alt="Benchmark dragon rendered with a median-split BVH"><figcaption>Dragon · median split</figcaption></figure>
+<figure><img src="assets/bench-dragon-sah.png" width="480" height="360" alt="The same benchmark dragon rendered with an SAH BVH"><figcaption>Dragon · surface area split</figcaption></figure>
+</div>
+      <p class="meta">The two dragon renders match pixel for pixel.</p>
+    </section>
 
-		<p>Here is an example 2x2 gridlike structure using an HTML table. Each <b>tr</b> is a row and each <b>td</b> is a column in that row. You might find this useful for framing and showing your result images in an organized fashion.</p>
-		<div style="display: flex; flex-direction: column; align-items: center;">
-			<table style="width: 100%; text-align: center; border-collapse: collapse;">
-			  <tr>
-				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
-				</td>
-				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
-				</td>
-			  </tr>
-			  <tr>
-				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
-				</td>
-				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
-				</td>
-			  </tr>
-			</table>
-		</div>
-		
-		<h2>Part 2: Bounding Volume Hierarchy</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+    <section id="ec-halton" class="sheet">
+      <h2>Part 6 · Randomized Halton pixel sampling</h2>
+      <p>With random sampling, several camera rays can bunch up on one side of a pixel. I added a Halton sampler to spread them out. For sample index <i>n</i>, I reverse its base-2 digits and put them after the point to get <i>x</i>. I do the same in base 3 for <i>y</i>. For example, index 2 gives (1/4, 2/3). This fills gaps as the sequence grows and works with any sample count, including when adaptive sampling stops early. <a href="https://pbr-book.org/4ed/Sampling_and_Reconstruction/Halton_Sampler">Physically Based Rendering, §8.6</a></p>
+      <p>I draw one random 2D shift per pixel and add it to every point in that pixel’s sequence. A coordinate that passes 1 wraps back into [0, 1). That way neighboring pixels get different patterns, while the samples within a pixel keep their spacing on the wrapped square. The change only affects where each camera ray enters the pixel. The light and bounce directions use the same samplers as before.</p>
+      <h3>Dragon silhouette and Cornell box noise</h3>
+      <p>I used six seeds per method with adaptive stopping disabled. For the dragon, I measured RGB error around the silhouette against a 512-sample reference. For the spheres, I measured how much the same back-wall pixels varied across runs. The wall stays clear of the silhouettes, so it shows lighting noise. The 1,024-sample render is included as a visual reference.</p>
+      <div class="figures ">
+<figure><img src="assets/sampling-dragon-random-11.png" width="480" height="360" alt="Normal-shaded dragon silhouette with four independent offsets per pixel"><figcaption>Dragon · random · 4 spp</figcaption></figure>
+<figure><img src="assets/sampling-dragon-halton-11.png" width="480" height="360" alt="Same dragon with four randomly shifted Halton offsets per pixel"><figcaption>Dragon · Halton · 4 spp</figcaption></figure>
+<figure><img src="assets/halton-dragon-reference.png" width="480" height="360" alt="High-sample reference for the dragon silhouette"><figcaption>Dragon · 512 spp reference</figcaption></figure>
+<figure><img src="assets/sampling-spheres-random-11.png" width="480" height="360" alt="Cornell spheres rendered with 16 independent offsets per pixel"><figcaption>Spheres · random · 16 spp</figcaption></figure>
+<figure><img src="assets/sampling-spheres-halton-11.png" width="480" height="360" alt="Same Cornell spheres with 16 randomly shifted Halton offsets per pixel"><figcaption>Spheres · Halton · 16 spp</figcaption></figure>
+<figure><img src="assets/halton-spheres-reference.png" width="480" height="360" alt="High-sample reference for the Cornell spheres"><figcaption>Spheres · 1,024 spp reference</figcaption></figure>
+</div>
+      <div class="table-viewport">
+        <table>
+          <caption>RMS error or run-to-run variation in the displayed RGB values, as a percentage of the full channel range. The spheres use four light samples and depth 5.</caption>
+          <thead><tr><th scope="col">Measurement</th><th scope="col">Random</th><th scope="col">Halton</th></tr></thead>
+          <tbody><tr><th scope="row">Dragon silhouette error</th><td>11.91%</td><td>9.11%</td></tr><tr><th scope="row">Spheres wall noise</th><td>3.72%</td><td>3.76%</td></tr></tbody>
+        </table>
+      </div>
+      <p>The error along the dragon’s edge fell by 23%. Noise on the spheres’ back wall rose by 1%. That makes sense to me because spreading out the samples helps cover thin geometry, while shadow rays and bounce directions still contribute their own variation.</p>
+    </section>
 
-		<h2>Part 3: Direct Illumination</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-
-		<h2>Part 4: Global Illumination</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-
-		<h2>Part 5: Adaptive Sampling</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-
-		<h2>(Optional) Part 6: Extra Credit Opportunities</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-		
-		<h2>Additional Notes (please remove)</h2>
-		<ul>
-			<li>You can also add code if you'd like as so: <code>code code code</code></li>
-			<li>If you'd like to add math equations, 
-				<ul>
-					<li>You can write inline equations like so: \( a^2 + b^2 = c^2 \)</li>
-					<li>You can write display equations like so: \[ a^2 + b^2 = c^2 \]</li>
-				</ul>
-			</li>
-		</ul>
-		</div>
-	</body>
+    <section id="ec-stack" class="sheet">
+      <h2>Part 6 · Stack-based BVH construction and traversal</h2>
+      <p>I kept the split calculation the same and moved the recursive work onto a <code>std::stack</code>. During construction, a stack entry holds a range of primitives and where its node belongs. I pop a range, build its node, and push the right range before the left one so the left node still gets built first. Both modes make their splits with the same SAH code.</p>
+      <p>For a closest-hit ray, I stay on the nearer child and push the farther child and its entry distance. By the time I pop it, a hit may have shortened the ray, so I can skip that child if its box is now too far away. Shadow rays visit the left child first and stop at the first blocker. I clear any pending entries for that ray before reusing the stack. Each worker keeps its own storage so it can reuse the same allocation across rays.</p>
+      <p>I alternated the order of the recursive and stack runs and took the median of five runs per mode. I fixed the seed and used one render thread. The paired images matched pixel for pixel, with the same ray and primitive-test counts. The bunny uses actual lighting so the test includes shadow rays as well as closest-hit rays.</p>
+      <div class="table-viewport">
+        <table>
+          <caption>Recursive / stack, 480 × 360. Teapot, dragon, and Lucy show normals at 16 samples per pixel. Bunny uses 8 samples per pixel, two light samples, and depth 3.</caption>
+          <thead><tr><th scope="col">Scene</th><th scope="col">Build (ms)</th><th scope="col">Render (ms)</th><th scope="col">Render speedup</th></tr></thead>
+          <tbody><tr><th scope="row">Teapot</th><td>0.7 / 0.7</td><td>274.7 / 264.0</td><td>1.041×</td></tr><tr><th scope="row">Dragon</th><td>53.9 / 53.8</td><td>315.7 / 305.1</td><td>1.035×</td></tr><tr><th scope="row">Cornell Lucy</th><td>63.2 / 64.4</td><td>338.3 / 319.2</td><td>1.060×</td></tr><tr><th scope="row">Cornell bunny</th><td>13.0 / 12.8</td><td>1286.9 / 1317.7</td><td>0.977×</td></tr></tbody>
+        </table>
+      </div>
+      <p>Build times were close. The stack helped most on Cornell Lucy, where render time fell by 6%. On the lit bunny, render time rose by 2%. Since the trees and primitive-test counts matched, the speed difference comes from how each version handles pending nodes. I kept recursion as the default and made the stack version selectable.</p>
+      <div class="figures pair">
+<figure><img src="assets/walk-3-recursive-0.png" width="480" height="360" alt="Cornell bunny lit with the recursive BVH"><figcaption>Bunny · recursive BVH</figcaption></figure>
+<figure><img src="assets/walk-3-stack-0.png" width="480" height="360" alt="Matching Cornell bunny rendered with the stack-based BVH"><figcaption>Bunny · stack-based BVH</figcaption></figure>
+</div>
+      <p class="meta">I used AI to format the final report.</p>
+    </section>
+  </main>
+</div>
+</body>
 </html>
